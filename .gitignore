@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地生成的复盘稿与缓存（含个人工作内容，不入库）
+复盘-*.md
+dist/
+*.zip
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
