@@ -23,31 +23,40 @@ description: 做周/月/年工作复盘时使用。先从本机项目日志与�
 
 ### 第 1 步：定周期
 
-日期一律用命令取，不要心算：
+周期交给脚本算，**不要手算日期，也不要依赖 `date -d "last monday"` 这类文本解析**。实测在部分环境（Git Bash）下它会静默返回错误日期——`date -d "2026-11-07 last monday"` 返回周六 11-07，既不是本周一也不是上周一，而且不报错。
 
-```bash
-date +%Y-%m-%d                                # 今天
-date -d "last monday" +%Y-%m-%d               # 本周一
-date -d "monday last week" +%Y-%m-%d          # 上周一
-date -d "monday last week +6 days" +%Y-%m-%d  # 上周日
-date -d "$(date +%Y-%m-01) -1 day" +%Y-%m-%d  # 上月最后一天（也是上月起始月的判断依据）
-```
+| 用户说 | 参数 | 扫到的区间 |
+|---|---|---|
+| 本周 / 这周 | `--period this-week` | 周一 ~ 今天 |
+| 上周 | `--period last-week` | 上周一 ~ 上周日 |
+| 本月 / 这个月 | `--period this-month` | 1 号 ~ 今天 |
+| 上月 / 上个月 | `--period last-month` | 完整自然月 |
+| 今年 | `--period this-year` | 1/1 ~ 今天 |
+| 去年 | `--period last-year` | 完整自然年 |
+
+任意区间用 `--since` / `--until` 显式指定。补做历史复盘时加 `--today YYYY-MM-DD` 把"今天"挪到那个时点。
 
 默认规则（用户没说范围时）：
-- 周五 / 周六 / 周日提问 → 做本周
-- 月初 1–5 号提问 → 做上月
-- 12 月下旬 / 1 月上旬提问 → 做上一年
+- 周五 / 周六 / 周日提问 → `this-week`
+- 月初 1–5 号提问 → `last-month`
+- 12 月下旬 / 1 月上旬提问 → `last-year`
 - 其余情况直接问一句"复盘哪个区间"，问完就开工，不要反复确认
+
+脚本返回的 `period` 字段（如 `2026-W45`）直接用来命名复盘文件，跨年周已按 ISO 规则处理，不会重名。
 
 ### 第 2 步：扫素材
 
 ```bash
-python <本 skill 目录>/scripts/scan_activity.py --since <起> --until <止> --pretty
+# 按周期
+python <本 skill 目录>/scripts/scan_activity.py --period last-week --pretty
+
+# 任意区间
+python <本 skill 目录>/scripts/scan_activity.py --since 2026-10-01 --until 2026-10-31 --pretty
 ```
 
 脚本默认扫描 `~/WorkBuddy/*/.workbuddy/memory/YYYY-MM-DD.md` 这套日志结构（WorkBuddy 的项目约定），可用 `--root` 改根目录。环境不同、没有这类日志时，直接跳过脚本，改从用户提供的记录、文档目录或对话历史里取素材——复盘的框架不依赖脚本。
 
-JSON 到 stdout，摘要到 stderr。重点读四处：
+JSON 到 stdout，摘要到 stderr（摘要里已含覆盖率）。重点读四处：
 
 | 字段 | 用途 |
 |---|---|
@@ -74,7 +83,9 @@ JSON 到 stdout，摘要到 stderr。重点读四处：
 - 有成型交付物、但那天没有日志 → "这东西交付的过程里，有什么没记下来的？"
 - 同一件事在日志里跨了好几篇但没结论 → "这件最后到底定了吗？"
 
-一次最多问 3 个，只问影响结论的。用户答"没什么"就按日志写，并在文档开头如实标注覆盖情况。
+一次最多问 3 个，只问影响结论的。
+
+**问完再动笔。** 盲区问题属于过程，不属于交付物——成品里不该出现"待补充""待你回答"这类清单。用户答"没什么"或一直不答，就在文档开头标注覆盖情况，按现有素材写下去。
 
 ### 第 4 步：归类
 

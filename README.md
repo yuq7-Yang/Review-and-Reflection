@@ -33,8 +33,10 @@ work-review/
 │   ├── weekly.md             # 周复盘框架与追问清单
 │   ├── monthly.md            # 月复盘框架
 │   └── yearly.md             # 年复盘框架
-└── scripts/
-    └── scan_activity.py      # 扫描时间窗口内的日志与文件痕迹
+├── scripts/
+│   └── scan_activity.py      # 扫描时间窗口内的日志与文件痕迹
+└── tests/
+    └── test_skill.py         # 自带 fixture 的自测，不依赖任何本机数据
 ```
 
 ## 安装
@@ -60,18 +62,34 @@ work-review/
 ## 素材扫描
 
 ```bash
+# 按周期（推荐，免去手算日期）
+python work-review/scripts/scan_activity.py --period last-week --pretty
+
+# 任意区间
 python work-review/scripts/scan_activity.py --since 2026-10-05 --until 2026-10-11 --pretty
 ```
+
+可选周期：`this-week` / `last-week` / `this-month` / `last-month` / `this-year` / `last-year`，返回的 `period` 字段（如 `2026-W45`）可直接用于命名文件。
+
+周期为什么内置：`date -d "last monday"` 这类文本解析在部分环境会**静默给出错误日期**。实测 Git Bash 下 `date -d "2026-11-07 last monday"` 返回周六 11-07，既不是本周一也不是上周一，而且不报错。把日期算进脚本，用 `datetime` 处理，周一当天、月初、跨年周、闰年都测过。
 
 脚本做了三层降噪，因为**文件数量不等于工作量**：
 
 | 机制 | 判定 | 作用 |
 |---|---|---|
-| 例行产出识别 | 同一带日期的命名模式重复 ≥4 次 | 排除 `ai-daily-2026-10-07.html` 这类自动化产物 |
+| 例行产出识别 | 同一带日期的命名模式在窗口内重复 ≥4 次 | 排除 `ai-daily-2026-10-07.html` 这类自动化产物 |
 | 素材堆折叠 | 同目录 ≥5 个文件且无成型交付物 | 一次爬虫抓的 800 张图，折叠成一条 |
 | 交付物收紧 | 只认 `.docx/.pdf/.pptx/.xlsx` | `.md`/`.html` 会批量生成，不算交付 |
 
 实测中，不做降噪时一个 38 天的窗口会算出 194 个"产出"，其中绝大部分是爬虫素材——统计完全失真。
+
+## 测试
+
+```bash
+python work-review/tests/test_skill.py
+```
+
+55 项断言，自带 fixture（在临时目录造项目结构），clone 下来就能跑，不依赖任何本机数据。覆盖：边界输入、错误处理、日志筛选、例行识别、素材折叠、交付物口径、文档一致性、周期计算（周一/周日/月初/跨年/闰年）、性能。若本机存在 `~/WorkBuddy`，额外做一次真实环境冒烟测试，否则跳过。
 
 ## 前置条件
 

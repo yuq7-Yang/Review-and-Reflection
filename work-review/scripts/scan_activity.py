@@ -23,7 +23,7 @@ import json
 import re
 import sys
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # 不参与产出统计的目录（构建缓存、依赖、版本库）
@@ -69,6 +69,49 @@ _DATE_PATTERNS = [
 
 def parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+PERIODS = {
+    "this-week": "本周（周一至今天）",
+    "last-week": "上周（完整 7 天）",
+    "this-month": "本月（1 号至今天）",
+    "last-month": "上月（完整自然月）",
+    "this-year": "今年（1/1 至今天）",
+    "last-year": "去年（完整自然年）",
+}
+
+
+def resolve_period(period: str, today: date) -> tuple[date, date, str]:
+    """把周期标识解析成起止日期与周期标签。
+
+    周以周一为第一天；标签用 ISO 年 + 周号，避免跨年周重名
+    （2026-12-28 属 2026 年，但 ISO 是 2027-W53）。
+    """
+    if period == "this-week":
+        start, end = today - timedelta(days=today.weekday()), today
+    elif period == "last-week":
+        this_mon = today - timedelta(days=today.weekday())
+        start, end = this_mon - timedelta(days=7), this_mon - timedelta(days=1)
+    elif period == "this-month":
+        start, end = today.replace(day=1), today
+    elif period == "last-month":
+        end = today.replace(day=1) - timedelta(days=1)
+        start = end.replace(day=1)
+    elif period == "this-year":
+        start, end = date(today.year, 1, 1), today
+    elif period == "last-year":
+        start, end = date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+    else:
+        raise ValueError(f"未知周期: {period}，可选 {', '.join(PERIODS)}")
+
+    iso_year, iso_week, _ = start.isocalendar()
+    if period.endswith("week"):
+        label = f"{iso_year}-W{iso_week:02d}"
+    elif period.endswith("month"):
+        label = f"{start.year}-{start.month:02d}"
+    else:
+        label = str(start.year)
+    return start, end, label
 
 
 def normalize_name(filename: str) -> str:
@@ -211,7 +254,7 @@ def count_deliverables(files: list[dict]) -> int:
     )
 
 
-def scan(root: Path, since: date, until: date) -> dict:
+def scan(root: Path, since: date, until: date, label: str | None = None) -> dict:
     if not root.is_dir():
         return {"error": f"root not found: {root}"}
 
@@ -263,6 +306,7 @@ def scan(root: Path, since: date, until: date) -> dict:
     }
 
     return {
+        "period": label,
         "window": {
             "since": since.isoformat(),
             "until": until.isoformat(),
@@ -278,32 +322,60 @@ def scan(root: Path, since: date, until: date) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="扫描工作窗口内的日志与产出")
-    ap.add_argument("--since", required=True, help="起始日期 YYYY-MM-DD（含）")
-    ap.add_argument("--until", required=True, help="结束日期 YYYY-MM-DD（含）")
+    ap = argparse.ArgumentParser(
+        description="扫描工作窗口内的日志与产出",
+        epilog="周期示例：--period last-week ；自定义区间：--since 2026-10-01 --until 2026-10-31",
+    )
+    ap.add_argument("--period", choices=list(PERIODS),
+                    help="按周期扫描，免去手算日期：" +
+                         "；".join(f"{k}={v}" for k, v in PERIODS.items()))
+    ap.add_argument("--since", help="起始日期 YYYY-MM-DD（含），与 --until 搭配")
+    ap.add_argument("--until", help="结束日期 YYYY-MM-DD（含），与 --since 搭配")
+    ap.add_argument("--today", help="覆盖「今天」，用于补做历史复盘或测试，YYYY-MM-DD")
     ap.add_argument("--root", default=str(Path.home() / "WorkBuddy"),
                     help="项目根目录，默认 ~/WorkBuddy")
     ap.add_argument("--pretty", action="store_true", help="在 stderr 附加人读摘要")
     args = ap.parse_args()
 
-    try:
-        since, until = parse_date(args.since), parse_date(args.until)
-    except ValueError as e:
-        print(json.dumps({"error": f"日期格式错误，需 YYYY-MM-DD: {e}"}, ensure_ascii=False))
-        return 2
-    if since > until:
-        print(json.dumps({"error": "--since 不能晚于 --until"}, ensure_ascii=False))
+    def emit_error(msg: str) -> int:
+        print(json.dumps({"error": msg}, ensure_ascii=False))
         return 2
 
-    result = scan(Path(args.root), since, until)
+    if args.period and (args.since or args.until):
+        return emit_error("--period 与 --since/--until 不能同时使用")
+
+    try:
+        today = parse_date(args.today) if args.today else date.today()
+    except ValueError:
+        return emit_error(f"--today 格式错误，需 YYYY-MM-DD: {args.today}")
+
+    if args.period:
+        try:
+            since, until, label = resolve_period(args.period, today)
+        except ValueError as e:
+            return emit_error(str(e))
+    elif args.since and args.until:
+        try:
+            since, until = parse_date(args.since), parse_date(args.until)
+        except ValueError as e:
+            return emit_error(f"日期格式错误，需 YYYY-MM-DD: {e}")
+        label = None
+    else:
+        return emit_error("需指定 --period，或同时给出 --since 与 --until")
+
+    if since > until:
+        return emit_error("--since 不能晚于 --until")
+
+    result = scan(Path(args.root), since, until, label)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     if args.pretty and "error" not in result:
         t, w = result["totals"], result["window"]
+        tag = f"[{result['period']}] " if result.get("period") else ""
         print(
-            f"\n[{w['since']} → {w['until']}] {w['days']} 天 | 有日志 {w['log_days']} 天"
+            f"\n{tag}[{w['since']} → {w['until']}] {w['days']} 天 | 有日志 {w['log_days']} 天（覆盖率 {w['log_days'] / max(w['days'], 1):.0%}）"
             f" | 项目 {t['projects']} | 日志 {t['logs']} 篇"
             f" | 文件 {t['files']} 个（例行 {t['routine']}，实质 {t['substantive']}，交付物 {t['deliverables']}）",
             file=sys.stderr,
