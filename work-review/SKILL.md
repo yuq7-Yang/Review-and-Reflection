@@ -46,15 +46,26 @@ description: 做周/月/年工作复盘时使用。先从本机项目日志与�
 
 ### 第 2 步：扫素材
 
-```bash
-# 按周期
-python <本 skill 目录>/scripts/scan_activity.py --period last-week --pretty
+先判断素材在哪，再选命令。**不要假设一定有本机日志**：
 
-# 任意区间
-python <本 skill 目录>/scripts/scan_activity.py --since 2026-10-01 --until 2026-10-31 --pretty
+| 情况 | 命令 |
+|---|---|
+| 机器上有 `~/WorkBuddy/*/.workbuddy/memory/` 项目日志 | `python <本 skill 目录>/scripts/scan_activity.py --period last-week --pretty` |
+| 日志在别处 | 加 `--root <目录>`（其每个一级子目录算一个项目） |
+| 只有一个仓库 / 一个目录 | 加 `--root . --single`（把该目录本身当作一个项目） |
+| 用 Obsidian / Logseq / 手写日记 | 加 `--notes <目录>`，可重复指定多个 |
+| 三者都没有 | 跳过脚本，直接问用户这段时间做了什么 |
+
+```bash
+# 常见组合
+python <本 skill 目录>/scripts/scan_activity.py --period last-week --pretty
+python <本 skill 目录>/scripts/scan_activity.py --period this-month --notes ~/notes
+python <本 skill 目录>/scripts/scan_activity.py --since 2026-10-01 --until 2026-10-31 --root . --single
 ```
 
-脚本默认扫描 `~/WorkBuddy/*/.workbuddy/memory/YYYY-MM-DD.md` 这套日志结构（WorkBuddy 的项目约定），可用 `--root` 改根目录。环境不同、没有这类日志时，直接跳过脚本，改从用户提供的记录、文档目录或对话历史里取素材——复盘的框架不依赖脚本。
+`--notes` 认文件名以 `YYYY-MM-DD` 开头的 `.md`（`2026-11-07.md`、`2026-11-07-周记.md` 都行），会递归子目录。
+
+**先看 `warnings`。** 出现「根目录不存在」「笔记目录不存在」说明没扫到东西，改路径；出现「条目超过 120 条」说明项目太大，缩小 `--root` 或换更短窗口。
 
 JSON 到 stdout，摘要到 stderr（摘要里已含覆盖率）。重点读四处：
 

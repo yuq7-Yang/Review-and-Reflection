@@ -9,7 +9,8 @@ A. 健壮性   —— 边界输入是否安全退出、错误是否可解析
 B. 数据正确性 —— 日志筛选、例行识别、素材折叠、交付物口径
 C. 文档一致性 —— SKILL.md 引用与核心条款
 D. 周期计算  —— 周一/周日/月初/跨年/闰年
-E. 性能     —— 真实环境存在时做冒烟测试
+E. 跨环境    —— --notes / --single / 默认根目录缺失时的降级
+F. 性能     —— 真实环境存在时做冒烟测试
 """
 from __future__ import annotations
 
@@ -36,10 +37,13 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
 
 
-def run(args: list[str]) -> tuple[int, dict | None, str]:
+def run(args: list[str], env: dict | None = None) -> tuple[int, dict | None, str]:
+    e = None
+    if env:
+        e = {**os.environ, **env}
     p = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        capture_output=True, text=True, encoding="utf-8", errors="replace", env=e,
     )
     try:
         data = json.loads(p.stdout) if p.stdout.strip() else None
@@ -82,6 +86,20 @@ WIN = ["--since", "2026-10-04", "--until", "2026-10-07"]
 tmp = Path(tempfile.mkdtemp(prefix="work-review-test-"))
 fixture = tmp / "projects"
 build_fixture(fixture)
+
+# 跨环境用的 fixture：一个日记目录、一个单仓库
+notes = tmp / "daily-notes"
+notes.mkdir()
+(notes / "2026-10-05.md").write_text("# 10-05\n\n## 客户对齐\n- 对齐范围\n", encoding="utf-8")
+(notes / "2026-10-06-周记.md").write_text("# 10-06\n\n## 返工\n- 方案被退\n", encoding="utf-8")
+(notes / "README.md").write_text("# 无日期的说明文件\n", encoding="utf-8")
+(notes / "2026-09-01.md").write_text("# 窗口外\n", encoding="utf-8")
+(notes / "sub").mkdir()
+(notes / "sub/2026-10-04.md").write_text("# 子目录也算\n", encoding="utf-8")
+
+one_repo = tmp / "one-repo"
+touch(one_repo / ".workbuddy/memory/2026-10-06.md", "# 10-06\n", "2026-10-06 20:00")
+touch(one_repo / "方案.docx", "x" * 100, "2026-10-06 15:00")
 
 try:
     # ---------- A. 健壮性 ----------
@@ -249,8 +267,57 @@ try:
     check("1 月取上月 → 上一年 12 月",
           w.get("since") == "2025-12-01" and w.get("until") == "2025-12-31")
 
-    # ---------- E. 真实环境冒烟 ----------
-    print("\n[E] 真实环境冒烟")
+    # ---------- E. 跨环境（无 WorkBuddy 日志时） ----------
+    print("\n[E] 跨环境")
+
+    code, d, _ = run([*WIN, "--root", str(fixture), "--notes", str(tmp / "nope-notes")])
+    d = d or {}
+    check("--notes 目录不存在 → 不报错，写入 warnings",
+          code == 0 and any("笔记目录不存在" in w for w in d.get("warnings", [])),
+          f"exit={code} {d.get('warnings')}")
+
+    code, d, _ = run([*WIN, "--root", str(tmp), "--notes", str(notes)])
+    d = d or {}
+    np_ = next((p for p in d.get("projects", []) if p.get("source") == "notes"), None)
+    check("--notes 被识别为独立日志源", bool(np_), "未出现 source=notes 的项目")
+    if np_:
+        check("笔记按日期文件名收录（含子目录，窗口外与无日期忽略）",
+              [lg["date"] for lg in np_["logs"]] == ["2026-10-04", "2026-10-05", "2026-10-06"],
+              str([lg["date"] for lg in np_["logs"]]))
+        check("笔记计入覆盖率统计",
+              "2026-10-04" in d.get("window", {}).get("log_dates", []),
+              str(d.get("window", {}).get("log_dates")))
+
+    code, d, _ = run([*WIN, "--root", str(notes / "nope"), "--notes", str(notes)])
+    check("显式 --root 不存在 → 仍报错（防路径写错）",
+          code == 2 and "error" in (d or {}), f"exit={code}")
+
+    code, d, _ = run(["--since", "2026-10-06", "--until", "2026-10-06",
+                      "--root", str(one_repo), "--single"])
+    d = d or {}
+    check("--single 把 root 自身当作单个项目",
+          [p["project"] for p in d.get("projects", [])] == ["one-repo"],
+          str([p["project"] for p in d.get("projects", [])]))
+    check("--single 下交付物与日志都计入",
+          d.get("totals", {}).get("logs") == 1 and d.get("totals", {}).get("deliverables") == 1,
+          str(d.get("totals")))
+
+    # 默认根目录不存在时不能整体失败（Cursor / Codex / Trae 用户常见）
+    empty_home = tmp / "empty-home"
+    empty_home.mkdir()
+    code, d, _ = run(["--period", "last-week", "--today", "2026-11-07"],
+                     env={"HOME": str(empty_home), "USERPROFILE": str(empty_home)})
+    d = d or {}
+    check("默认根目录缺失 → 退出码 0，不中断流程", code == 0, f"exit={code}")
+    check("默认根目录缺失 → 给出可执行提示",
+          bool(d.get("warnings")) and "--notes" in " ".join(d.get("warnings", [])),
+          str(d.get("warnings")))
+    check("默认根目录缺失 → 仍返回完整 window（覆盖率 0%）",
+          d.get("window", {}).get("log_days") == 0 and d.get("window", {}).get("days") == 7,
+          str(d.get("window")))
+
+    # ---------- F. 真实环境冒烟 ----------
+    print("\n[F] 真实环境冒烟")
 
     if REAL_ROOT.is_dir():
         t0 = time.time()

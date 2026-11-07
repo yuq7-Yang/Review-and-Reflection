@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """扫描指定时间窗口内的工作痕迹。
 
-两个数据源：
+三个数据源：
 1. 各项目 .workbuddy/memory/YYYY-MM-DD.md 日志（以文件名为日期）
 2. 各项目下在窗口内被创建/修改的产出文件（以 mtime 为准）
+3. --notes 指定的任意笔记目录里 YYYY-MM-DD*.md 日记（Obsidian / Logseq / 手写笔记都能用）
 
 产出文件做两层降噪，避免"文件多 = 工作多"的错觉：
 - 例行识别：同一带日期的命名模式重复出现（如 ai-daily-2026-10-07.html），判定为自动化产物
 - 素材折叠：同一目录下堆积的零散文件（爬虫图片、切图、字体等）折叠为一条 bundle
 
 用法:
-    python scan_activity.py --since 2026-11-02 --until 2026-11-07
+    python scan_activity.py --period last-week --pretty
     python scan_activity.py --since 2026-11-01 --until 2026-11-30 --pretty
-    python scan_activity.py --since 2026-01-01 --until 2026-12-31 --root "~/WorkBuddy"
+    python scan_activity.py --period last-year --root "~/WorkBuddy"
+    python scan_activity.py --period this-week --notes ~/notes        # 只有日记，没有项目日志
+    python scan_activity.py --period this-month --root . --single     # 把当前仓库当作单个项目
 
 输出 JSON 到 stdout；--pretty 时在 stderr 附加人读摘要。
 """
@@ -167,6 +170,42 @@ def iter_memory_logs(project: Path, since: date, until: date) -> list[dict]:
     return logs
 
 
+_NOTE_STEM = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+
+def iter_note_logs(ndir: Path, since: date, until: date) -> list[dict]:
+    """读取任意笔记目录里以日期开头的 md（2026-11-07.md、2026-11-07-周记.md 都认）。
+
+    用于没有 WorkBuddy 项目日志的环境：Cursor / Codex / Trae 用户把日记目录指过来即可。
+    """
+    if not ndir.is_dir():
+        return []
+
+    logs = []
+    for f in sorted(ndir.rglob("*.md")):
+        rel = f.relative_to(ndir)
+        if any(p in SKIP_DIRS or p.startswith(".") for p in rel.parts[:-1]):
+            continue
+        m = _NOTE_STEM.match(f.stem)
+        if not m:
+            continue
+        try:
+            d = parse_date(m.group(1))
+        except ValueError:
+            continue
+        if not (since <= d <= until):
+            continue
+        logs.append({
+            "date": d.isoformat(),
+            "name": f.stem,
+            "path": str(f),
+            "size_kb": round(f.stat().st_size / 1024, 1),
+            "outline": extract_outline(f),
+        })
+    logs.sort(key=lambda x: x["date"])
+    return logs
+
+
 def is_intermediate(rel_parts: tuple[str, ...]) -> bool:
     for part in rel_parts[:-1]:
         low = part.lower()
@@ -254,17 +293,27 @@ def count_deliverables(files: list[dict]) -> int:
     )
 
 
-def scan(root: Path, since: date, until: date, label: str | None = None) -> dict:
-    if not root.is_dir():
-        return {"error": f"root not found: {root}"}
-
+def scan(root: Path, since: date, until: date, label: str | None = None,
+         notes_dirs: tuple[Path, ...] | list[Path] = (), single: bool = False) -> dict:
     projects = []
     warnings = []
 
-    for proj in sorted(root.iterdir()):
-        if not proj.is_dir() or proj.name.startswith("."):
-            continue
+    if root.is_dir():
+        if single:
+            targets = [(root.name or str(root), root)]
+        else:
+            targets = [
+                (p.name, p) for p in sorted(root.iterdir())
+                if p.is_dir() and not p.name.startswith(".")
+            ]
+    else:
+        targets = []
+        warnings.append(
+            f"根目录不存在: {root}。已跳过文件扫描——用 --root 指定项目根目录，"
+            f"或用 --notes 指向你的笔记目录；两者都没有时，改用提问引导模式。"
+        )
 
+    for name, proj in targets:
         logs = iter_memory_logs(proj, since, until)
         files = collect_files(proj, since, until)
         if not logs and not files:
@@ -277,11 +326,12 @@ def scan(root: Path, since: date, until: date, label: str | None = None) -> dict
             items.sort(key=lambda x: (x["intermediate"], x["mtime"]))
             items = items[-MAX_ITEMS_PER_PROJECT:]
             items.sort(key=lambda x: x["mtime"], reverse=True)
-            warnings.append(f"{proj.name}: 条目超过 {MAX_ITEMS_PER_PROJECT}，已保留最新 {MAX_ITEMS_PER_PROJECT} 条")
+            warnings.append(f"{name}: 条目超过 {MAX_ITEMS_PER_PROJECT}，已保留最新 {MAX_ITEMS_PER_PROJECT} 条")
 
         projects.append({
-            "project": proj.name,
+            "project": name,
             "path": str(proj),
+            "source": "project",
             "counts": {
                 "logs": len(logs),
                 "files": len(files),
@@ -292,6 +342,24 @@ def scan(root: Path, since: date, until: date, label: str | None = None) -> dict
             },
             "logs": logs,
             "items": items,
+        })
+
+    for nd in notes_dirs:
+        logs = iter_note_logs(nd, since, until)
+        if not logs:
+            if not nd.is_dir():
+                warnings.append(f"笔记目录不存在: {nd}")
+            continue
+        projects.append({
+            "project": f"[notes] {nd.name or str(nd)}",
+            "path": str(nd),
+            "source": "notes",
+            "counts": {
+                "logs": len(logs), "files": 0, "items": 0,
+                "routine": 0, "substantive": 0, "deliverables": 0,
+            },
+            "logs": logs,
+            "items": [],
         })
 
     projects.sort(key=lambda p: p["counts"]["logs"] * 10 + p["counts"]["substantive"], reverse=True)
@@ -332,8 +400,13 @@ def main() -> int:
     ap.add_argument("--since", help="起始日期 YYYY-MM-DD（含），与 --until 搭配")
     ap.add_argument("--until", help="结束日期 YYYY-MM-DD（含），与 --since 搭配")
     ap.add_argument("--today", help="覆盖「今天」，用于补做历史复盘或测试，YYYY-MM-DD")
-    ap.add_argument("--root", default=str(Path.home() / "WorkBuddy"),
-                    help="项目根目录，默认 ~/WorkBuddy")
+    ap.add_argument("--root", default=None,
+                    help="项目根目录，其每个一级子目录算一个项目；默认 ~/WorkBuddy")
+    ap.add_argument("--single", action="store_true",
+                    help="把 --root 自身当作单个项目，而不是把它的子目录当作多个项目")
+    ap.add_argument("--notes", action="append", default=[], metavar="DIR",
+                    help="笔记目录（可重复）：扫描其中文件名以 YYYY-MM-DD 开头的 .md，"
+                         "适用于 Obsidian / Logseq / 手写日记")
     ap.add_argument("--pretty", action="store_true", help="在 stderr 附加人读摘要")
     args = ap.parse_args()
 
@@ -366,7 +439,14 @@ def main() -> int:
     if since > until:
         return emit_error("--since 不能晚于 --until")
 
-    result = scan(Path(args.root), since, until, label)
+    # 显式给了 --root 却不存在 → 报错（多半是路径写错）
+    # 没给 --root 且默认目录不存在 → 不报错，降级为「只扫 --notes 或纯提问」
+    root = Path(args.root).expanduser() if args.root else Path.home() / "WorkBuddy"
+    if args.root and not root.is_dir():
+        return emit_error(f"root not found: {root}")
+
+    notes_dirs = [Path(n).expanduser() for n in args.notes]
+    result = scan(root, since, until, label, notes_dirs, args.single)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -384,6 +464,8 @@ def main() -> int:
             c = p["counts"]
             print(f"  - {p['project']}: 日志 {c['logs']} / 实质 {c['substantive']}"
                   f" / 交付物 {c['deliverables']} / 条目 {c['items']}", file=sys.stderr)
+        for w in result.get("warnings", []):
+            print(f"  ! {w}", file=sys.stderr)
     return 0
 
 
